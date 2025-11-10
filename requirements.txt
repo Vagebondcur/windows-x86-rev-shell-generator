@@ -1,0 +1,11 @@
+# Reverse Shell Shellcode Generator Dependencies
+#
+# It's recommended to use a virtual environment:
+# python3 -m venv .venv && source .venv/bin/activate
+#
+# Then install dependencies:
+# pip3 install -r requirements.txt
+
+keystone-engine
+capstone
+setuptools
